@@ -44,7 +44,7 @@ async def fetch_next_data(session: aiohttp.ClientSession, url: str):
             if not el or not el.string:
                 return None
             return json.loads(el.string)
-        except Exception as e:
+        except Exception:
             logging.exception("Failed to parse __NEXT_DATA__")
             return None
 
@@ -96,8 +96,8 @@ async def download_media_to_dir(session: aiohttp.ClientSession, url: str, dest_d
         ct = resp.headers.get("Content-Type", "")
         ext = ".jpg" if "image" in ct else ".mp4" if "video" in ct else ""
         filename = base
-        if not filename.lower().endswith(ext):
-            filename = f"{filename}{ext}" if ext else filename
+        if ext and not filename.lower().endswith(ext):
+            filename = f"{filename}{ext}"
         path = os.path.join(dest_dir, filename)
         # write file
         try:
@@ -183,20 +183,15 @@ def snapchat_page():
     snapchat_logo_url = "https://pngimg.com/uploads/snapchat/snapchat_PNG61.png"
     st.image(snapchat_logo_url, width=160)
     st.markdown("<div class='snap-title'>👻 Snapify — Snapchat Media Viewer</div>", unsafe_allow_html=True)
-    st.write("Enter a Snapchat username and choose what to fetch. (Stories, Highlights, Spotlights)")
+    st.write("Enter a Snapchat username and fetch stories. Use the dedicated tabs for Highlights and Spotlights.")
 
-    username = st.text_input("Snapchat username", value="", help="example: ricardo")
-    zip_toggle = st.checkbox("Offer ZIP download", value=True)
-    cols = st.columns([1,1,2])
-    with cols[0]:
-        fetch_stories = st.button("Fetch Stories", key="fetch_stories")
-    with cols[1]:
-        fetch_highlights = st.button("Fetch Highlights", key="fetch_highlights")
-    with cols[2]:
-        fetch_spotlights = st.button("Fetch Spotlights", key="fetch_spotlights")
+    username = st.text_input("Snapchat username", value="", help="example: ricardo", key="stories_username")
+    zip_toggle = st.checkbox("Offer ZIP download", value=True, key="stories_zip")
 
-    if username:
-        if fetch_stories:
+    if st.button("Fetch Stories", key="fetch_stories_btn"):
+        if not username:
+            st.error("Please enter a valid Snapchat username.")
+        else:
             with st.spinner("Fetching stories..."):
                 data = fetch_json_sync(username)
                 if not data:
@@ -219,68 +214,6 @@ def snapchat_page():
                             if z:
                                 with open(z, "rb") as f:
                                     st.download_button("Download Stories ZIP", data=f, file_name=os.path.basename(z), mime="application/zip")
-        if fetch_highlights:
-            with st.spinner("Fetching highlights..."):
-                data = fetch_json_sync(username)
-                if not data:
-                    st.error("No data found or can't access the user's page.")
-                else:
-                    media_map = extract_media_urls(data)
-                    highlight_keys = sorted([k for k in media_map.keys() if "spotlight" not in k.lower()], key=lambda s: s.lower())
-                    if not highlight_keys:
-                        st.info("No highlights found.")
-                    else:
-                        st.success(f"Found {len(highlight_keys)} highlight albums.")
-                        # Let user pick an album (or "All")
-                        album_choice = st.selectbox("Choose highlight album to download (or All)", ["All"] + highlight_keys)
-                        selected_urls = []
-                        if album_choice == "All":
-                            for k in highlight_keys:
-                                selected_urls.extend(media_map.get(k, []))
-                        else:
-                            selected_urls = media_map.get(album_choice, [])
-                        if not selected_urls:
-                            st.info("No media URLs for this selection.")
-                        else:
-                            st.write(f"Found {len(selected_urls)} media items. Downloading…")
-                            files = download_and_collect_sync(selected_urls, username, f"highlights_{slugify(album_choice)}")
-                            display_media_grid(files, cols_per_row=3)
-                            if zip_toggle and files:
-                                z = make_zip_from_files(files, username, kind=f"highlights_{slugify(album_choice)}")
-                                if z:
-                                    with open(z, "rb") as f:
-                                        st.download_button("Download Highlights ZIP", data=f, file_name=os.path.basename(z), mime="application/zip")
-        if fetch_spotlights:
-            with st.spinner("Fetching spotlights..."):
-                data = fetch_json_sync(username)
-                if not data:
-                    st.error("No data found or can't access the user's page.")
-                else:
-                    media_map = extract_media_urls(data)
-                    spotlight_keys = sorted([k for k in media_map.keys() if "spotlight" in k.lower()], key=lambda s: s.lower())
-                    if not spotlight_keys:
-                        st.info("No spotlights found.")
-                    else:
-                        st.success(f"Found {len(spotlight_keys)} spotlight albums.")
-                        # Provide album choice or All
-                        album_choice = st.selectbox("Choose spotlight album to download (or All)", ["All"] + spotlight_keys, key="spot_album")
-                        selected_urls = []
-                        if album_choice == "All":
-                            for k in spotlight_keys:
-                                selected_urls.extend(media_map.get(k, []))
-                        else:
-                            selected_urls = media_map.get(album_choice, [])
-                        if not selected_urls:
-                            st.info("No media URLs for this selection.")
-                        else:
-                            st.write(f"Found {len(selected_urls)} media items. Downloading…")
-                            files = download_and_collect_sync(selected_urls, username, f"spotlights_{slugify(album_choice)}")
-                            display_media_grid(files, cols_per_row=3)
-                            if zip_toggle and files:
-                                z = make_zip_from_files(files, username, kind=f"spotlights_{slugify(album_choice)}")
-                                if z:
-                                    with open(z, "rb") as f:
-                                        st.download_button("Download Spotlights ZIP", data=f, file_name=os.path.basename(z), mime="application/zip")
 
 def highlights_tab():
     st.header("Highlights")
