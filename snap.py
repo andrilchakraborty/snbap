@@ -6,11 +6,9 @@ import json
 import logging
 import os
 import re
-import sys
 import zipfile
 import tempfile
 from datetime import datetime
-from pathlib import Path
 from urllib.parse import urlparse, unquote
 from bs4 import BeautifulSoup
 import streamlit as st
@@ -88,7 +86,6 @@ async def download_media_to_dir(session: aiohttp.ClientSession, url: str, dest_d
     parsed = urlparse(url)
     base = unquote(os.path.basename(parsed.path))
     base = re.sub(r'[<>:"/\\|?*]', "", base)
-    # try to get extension from content-type
     async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
         if resp.status != 200:
             logging.error(f"Failed to download {url}: HTTP {resp.status}")
@@ -99,7 +96,6 @@ async def download_media_to_dir(session: aiohttp.ClientSession, url: str, dest_d
         if ext and not filename.lower().endswith(ext):
             filename = f"{filename}{ext}"
         path = os.path.join(dest_dir, filename)
-        # write file
         try:
             async with aiofiles.open(path, "wb") as f:
                 async for chunk in resp.content.iter_chunked(1024):
@@ -178,6 +174,7 @@ def display_media_grid(media_files: list[str], cols_per_row: int = 3):
         except Exception:
             col.write(os.path.basename(m))
 
+# ----------------- Pages -----------------
 def snapchat_page():
     add_custom_css()
     snapchat_logo_url = "https://pngimg.com/uploads/snapchat/snapchat_PNG61.png"
@@ -197,7 +194,6 @@ def snapchat_page():
                 if not data:
                     st.error("No data found or can't access the user's page.")
                 else:
-                    # Collect story snapList (if any)
                     snaps = (data.get("props", {})
                                 .get("pageProps", {})
                                 .get("story", {})
@@ -208,19 +204,30 @@ def snapchat_page():
                     else:
                         st.success(f"Found {len(story_urls)} story snaps. Downloading...")
                         files = download_and_collect_sync(story_urls, username, "stories")
+                        # persist files in session for UX continuity
+                        st.session_state[f"stories_files_{username}"] = files
                         display_media_grid(files, cols_per_row=3)
                         if zip_toggle and files:
                             z = make_zip_from_files(files, username, kind="stories")
                             if z:
                                 with open(z, "rb") as f:
                                     st.download_button("Download Stories ZIP", data=f, file_name=os.path.basename(z), mime="application/zip")
+    # If we have previously fetched stories for this username show them
+    key_prev = f"stories_files_{username}"
+    if username and key_prev in st.session_state and st.session_state.get(key_prev):
+        st.write("---")
+        st.markdown("### Previously downloaded stories (this session)")
+        display_media_grid(st.session_state[key_prev], cols_per_row=3)
 
 def highlights_tab():
     st.header("Highlights")
-    st.write("Enter username and pick highlight album. (This tab focuses only on highlights.)")
+    st.write("Enter username and pick highlight album. Fetching populates album choices and persists them so UI won't clear.")
+
     username = st.text_input("Username (highlights tab)", key="high_user")
     zip_toggle = st.checkbox("Offer ZIP download", value=True, key="high_zip")
-    if st.button("Fetch Highlights (tab)", key="fetch_high_tab"):
+
+    # Fetch button populates session_state with media_map & highlight keys for this username
+    if st.button("Fetch Highlights", key="fetch_high_tab"):
         if not username:
             st.error("Please enter a username.")
         else:
@@ -233,31 +240,63 @@ def highlights_tab():
                     highlight_keys = sorted([k for k in media_map.keys() if "spotlight" not in k.lower()], key=lambda s: s.lower())
                     if not highlight_keys:
                         st.info("No highlights found.")
-                        return
-                    album_choice = st.selectbox("Choose highlight album to download (or All)", ["All"] + highlight_keys, key="high_album_choice")
-                    selected_urls = []
-                    if album_choice == "All":
-                        for k in highlight_keys:
-                            selected_urls.extend(media_map.get(k, []))
+                        # clear any previous state for this username
+                        for key in (f"high_map_{username}", f"high_keys_{username}", f"high_files_{username}", f"high_choice_{username}"):
+                            if key in st.session_state:
+                                del st.session_state[key]
                     else:
-                        selected_urls = media_map.get(album_choice, [])
-                    if not selected_urls:
-                        st.info("No media urls for selection.")
-                    else:
-                        files = download_and_collect_sync(selected_urls, username, f"highlights_{slugify(album_choice)}")
-                        display_media_grid(files)
-                        if zip_toggle and files:
-                            z = make_zip_from_files(files, username, kind=f"highlights_{slugify(album_choice)}")
-                            if z:
-                                with open(z, "rb") as f:
-                                    st.download_button("Download Highlights ZIP", data=f, file_name=os.path.basename(z), mime="application/zip")
+                        st.session_state[f"high_map_{username}"] = media_map
+                        st.session_state[f"high_keys_{username}"] = highlight_keys
+                        # default choice "All"
+                        st.session_state.setdefault(f"high_choice_{username}", "All")
+                        st.success(f"Found {len(highlight_keys)} highlight album(s). Choose one below and press Display.")
+
+    # If we have highlight keys in session for this username show selectbox and display button
+    keys_key = f"high_keys_{username}"
+    map_key = f"high_map_{username}"
+    choice_key = f"high_choice_{username}"
+    files_key = f"high_files_{username}"
+
+    if username and keys_key in st.session_state:
+        highlight_keys = st.session_state[keys_key]
+        # always show the selectbox so user's choice persists and doesn't clear UI
+        album_choice = st.selectbox("Choose highlight album to download (or All)", ["All"] + highlight_keys, key=choice_key, index=0 if st.session_state.get(choice_key) == "All" else None)
+        # Display / Download action
+        if st.button("Display Highlights", key=f"display_high_{username}"):
+            selected_urls = []
+            media_map = st.session_state.get(map_key, {})
+            if album_choice == "All":
+                for k in highlight_keys:
+                    selected_urls.extend(media_map.get(k, []))
+            else:
+                selected_urls = media_map.get(album_choice, [])
+            if not selected_urls:
+                st.info("No media URLs for this selection.")
+            else:
+                st.write(f"Found {len(selected_urls)} media items. Downloading…")
+                files = download_and_collect_sync(selected_urls, username, f"highlights_{slugify(album_choice)}")
+                st.session_state[files_key] = files
+                display_media_grid(files, cols_per_row=3)
+                if zip_toggle and files:
+                    z = make_zip_from_files(files, username, kind=f"highlights_{slugify(album_choice)}")
+                    if z:
+                        with open(z, "rb") as f:
+                            st.download_button("Download Highlights ZIP", data=f, file_name=os.path.basename(z), mime="application/zip")
+
+    # If we have files from a previous display, show them below
+    if username and files_key in st.session_state and st.session_state.get(files_key):
+        st.write("---")
+        st.markdown("### Previously downloaded highlights (this session)")
+        display_media_grid(st.session_state[files_key], cols_per_row=3)
 
 def spotlights_tab():
     st.header("Spotlights")
-    st.write("Enter username and pick spotlight album. (This tab focuses only on spotlight content.)")
+    st.write("Enter username and fetch spotlights. All spotlight media will be displayed (no album select).")
+
     username = st.text_input("Username (spotlights tab)", key="spot_user")
     zip_toggle = st.checkbox("Offer ZIP download", value=True, key="spot_zip")
-    if st.button("Fetch Spotlights (tab)", key="fetch_spot_tab"):
+
+    if st.button("Fetch Spotlights", key="fetch_spot_tab"):
         if not username:
             st.error("Please enter a username.")
         else:
@@ -270,25 +309,35 @@ def spotlights_tab():
                     spotlight_keys = sorted([k for k in media_map.keys() if "spotlight" in k.lower()], key=lambda s: s.lower())
                     if not spotlight_keys:
                         st.info("No spotlights found.")
-                        return
-                    album_choice = st.selectbox("Choose spotlight album to download (or All)", ["All"] + spotlight_keys, key="spot_album_choice")
-                    selected_urls = []
-                    if album_choice == "All":
+                        # clear previous state for this username
+                        if f"spot_files_{username}" in st.session_state:
+                            del st.session_state[f"spot_files_{username}"]
+                    else:
+                        # collect all spotlight urls (no album selection)
+                        spotlight_urls = []
                         for k in spotlight_keys:
-                            selected_urls.extend(media_map.get(k, []))
-                    else:
-                        selected_urls = media_map.get(album_choice, [])
-                    if not selected_urls:
-                        st.info("No media urls for selection.")
-                    else:
-                        files = download_and_collect_sync(selected_urls, username, f"spotlights_{slugify(album_choice)}")
-                        display_media_grid(files)
-                        if zip_toggle and files:
-                            z = make_zip_from_files(files, username, kind=f"spotlights_{slugify(album_choice)}")
-                            if z:
-                                with open(z, "rb") as f:
-                                    st.download_button("Download Spotlights ZIP", data=f, file_name=os.path.basename(z), mime="application/zip")
+                            spotlight_urls.extend(media_map.get(k, []))
+                        if not spotlight_urls:
+                            st.info("No spotlight media URLs found.")
+                        else:
+                            st.success(f"Found {len(spotlight_urls)} spotlight items. Downloading and displaying all of them…")
+                            files = download_and_collect_sync(spotlight_urls, username, "spotlights_all")
+                            st.session_state[f"spot_files_{username}"] = files
+                            display_media_grid(files, cols_per_row=3)
+                            if zip_toggle and files:
+                                z = make_zip_from_files(files, username, kind="spotlights")
+                                if z:
+                                    with open(z, "rb") as f:
+                                        st.download_button("Download Spotlights ZIP", data=f, file_name=os.path.basename(z), mime="application/zip")
 
+    # If we have previously fetched spotlights for this username show them
+    prev_key = f"spot_files_{username}"
+    if username and prev_key in st.session_state and st.session_state.get(prev_key):
+        st.write("---")
+        st.markdown("### Previously downloaded spotlights (this session)")
+        display_media_grid(st.session_state[prev_key], cols_per_row=3)
+
+# ----------------- App entry -----------------
 def main():
     st.set_page_config(
         page_title="Snapify",
